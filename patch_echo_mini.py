@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
 """
-patch_echo_mini.py — Parche de boot por tema para el Echo Mini (RKnano)
-=======================================================================
+patch_echo_mini.py — Per-theme boot patch for the Echo Mini (RKnano)
+=====================================================================
 
-Qué hace
---------
-Modifica el firmware .IMG para que cada tema tenga su propia animación
-de encendido/apagado independiente, en lugar de compartir la del Tema A.
+What it does
+------------
+Modifies the firmware .IMG so each theme has its own independent boot/shutdown
+animation instead of sharing Theme A's animation.
 
-Cambios que aplica
-------------------
-1. Expande la tabla ROCK26: 1602 → 1870 entradas (5 bloques × 374)
-2. Expande la tabla de metadatos con las mismas entradas × 5
+Changes applied
+---------------
+1. Expands the ROCK26 table: 1602 → 1870 entries (5 blocks × 374)
+2. Expands the metadata table with the same entries × 5
 3. CMP R0, #0x43  →  CMP R0, #0x00
 4. 4 × ADDW: [307, 614, 921, 1228] → [374, 748, 1122, 1496]
-5. Actualiza fw_end y escribe la header copy al final del archivo
+5. Updates fw_end and writes the header copy at the end of the file
 
-Uso
----
+Usage
+-----
     python patch_echo_mini.py HIFIEC20.IMG
-    python patch_echo_mini.py HIFIEC20.IMG -o firmware_modificado.IMG
+    python patch_echo_mini.py HIFIEC20.IMG -o firmware_patched.IMG
     python patch_echo_mini.py HIFIEC20.IMG --check
 
-Requisitos
-----------
-    Python 3.8+  (sin dependencias externas)
+Requirements
+------------
+    Python 3.8+  (no external dependencies)
 """
 
 import sys
@@ -57,7 +57,7 @@ class FirmwarePatcher:
 
         rock26_off = bytes(part5).find(b'ROCK26IMAGERES')
         if rock26_off == -1:
-            raise ValueError("No se encontró ROCK26IMAGERES en el firmware.")
+            raise ValueError("ROCK26IMAGERES not found in firmware.")
 
         self.rock26_off_in_part5   = rock26_off
         self.rock26_start_in_part5 = rock26_off + 32
@@ -76,7 +76,7 @@ class FirmwarePatcher:
                     break
 
         if first_match is None:
-            raise ValueError("No se encontró la tabla de metadatos.")
+            raise ValueError("Metadata table not found.")
 
         table_start = first_match
         while table_start >= self.METADATA_ENTRY_SIZE:
@@ -122,7 +122,7 @@ class FirmwarePatcher:
         return struct.pack('<HH', hw1, hw2)
 
     def detect_patch_info(self) -> dict:
-        data = self.img_data
+        data       = self.img_data
         cmp_offset = None
 
         for off in range(0x200, min(len(data), 0x400000), 2):
@@ -142,7 +142,7 @@ class FirmwarePatcher:
                     break
 
         if cmp_offset is None:
-            raise ValueError("No se encontró la instrucción CMP de despacho de temas.")
+            raise ValueError("Theme dispatch CMP instruction not found.")
 
         addw_list = []
         for scan in range(cmp_offset + 2, cmp_offset + 80, 2):
@@ -157,7 +157,7 @@ class FirmwarePatcher:
                         break
 
         if len(addw_list) < 4:
-            raise ValueError(f"CMP encontrado pero solo {len(addw_list)} ADDW (se necesitan 4).")
+            raise ValueError(f"CMP found but only {len(addw_list)} ADDW instructions (need 4).")
 
         cmp_val     = struct.unpack_from('<H', data, cmp_offset)[0]
         is_patched  = (cmp_val == 0x2800)
@@ -184,7 +184,7 @@ class FirmwarePatcher:
     def patch_for_themed_boots(self, progress_fn=None) -> str:
         info = self.detect_patch_info()
         if info['is_patched']:
-            return "El firmware ya tiene el parche aplicado (CMP R0,#0x00 detectado)."
+            return "Firmware is already patched (CMP R0,#0x00 detected)."
 
         data      = self.img_data
         SHARED    = info['shared_count']
@@ -197,6 +197,7 @@ class FirmwarePatcher:
         r26_start = self.rock26_start_in_part5
         old_count = self.rock26_count
 
+        # Read shared resources (indices 0-66)
         shared_r26 = []
         for i in range(SHARED):
             eo = r26_start + i * 16
@@ -207,12 +208,14 @@ class FirmwarePatcher:
             tp = self.entries[i]['table_pos']
             shared_meta_raw.append(bytes(part5[tp:tp + self.METADATA_ENTRY_SIZE]))
 
+        # Build new tables: 5 blocks × NEW_BLK entries
         new_r26  = []
         new_meta = []
         theme_letters = ['A', 'B', 'C', 'D', 'E']
 
         for t_idx in range(5):
             letter = theme_letters[t_idx]
+            # 67 shared boot copies (renamed T_X_ for themes B-E)
             for i in range(SHARED):
                 new_r26.append(shared_r26[i])
                 meta_raw = bytearray(shared_meta_raw[i])
@@ -223,6 +226,7 @@ class FirmwarePatcher:
                     meta_raw[32:96] = name_bytes + b'\x00' * (64 - len(name_bytes))
                 new_meta.append(bytes(meta_raw))
 
+            # OLD_BLK themed resources (icons, backgrounds, etc.)
             old_start = SHARED + t_idx * OLD_BLK
             for i in range(OLD_BLK):
                 src_idx = old_start + i
@@ -242,6 +246,7 @@ class FirmwarePatcher:
 
         new_count = len(new_r26)
 
+        # Write expanded ROCK26 table
         r26_abs   = self.part5_offset + self.rock26_off_in_part5
         count_abs = r26_abs + 16
         struct.pack_into('<I', data, count_abs, new_count)
@@ -252,6 +257,7 @@ class FirmwarePatcher:
                 data.extend(b'\x00' * (pos + 16 - len(data)))
             data[pos:pos + 16] = entry_raw
 
+        # Write expanded metadata table
         meta_abs = self.part5_offset + self.table_start
         for i, meta_raw in enumerate(new_meta):
             pos = meta_abs + i * self.METADATA_ENTRY_SIZE
@@ -262,12 +268,15 @@ class FirmwarePatcher:
         if progress_fn:
             progress_fn(50)
 
+        # Update Part5 size in header
         new_p5_end      = (meta_abs + len(new_meta) * self.METADATA_ENTRY_SIZE) - self.part5_offset
         self.part5_size = new_p5_end
         struct.pack_into('<I', data, 0x150, new_p5_end)
 
+        # Patch CMP R0,#0x43 → CMP R0,#0x00
         data[cmp_off:cmp_off + 2] = struct.pack('<H', 0x2800)
 
+        # Patch 4 ADDW instructions
         new_addw_vals = [NEW_BLK * (i + 1) for i in range(4)]
         for i, (foff, _old_val) in enumerate(addw_list):
             data[foff:foff + 4] = self._encode_addw(new_addw_vals[i], rd=0, rn=0)
@@ -275,31 +284,34 @@ class FirmwarePatcher:
         if progress_fn:
             progress_fn(70)
 
+        # Fix file integrity (fw_end, header copy, trailer)
         self._fix_integrity()
 
         if progress_fn:
             progress_fn(100)
 
         return (
-            f"✅ Parche aplicado correctamente\n"
+            f"Patch applied successfully\n"
             f"   CMP  : 0x{cmp_off:X}  (0x2843 → 0x2800)\n"
             f"   ADDW : {[v for _, v in addw_list]} → {new_addw_vals}\n"
-            f"   Tabla: {old_count} → {new_count} entradas\n"
-            f"   Bloque: {OLD_BLK} → {NEW_BLK} recursos/tema\n"
+            f"   Table: {old_count} → {new_count} entries\n"
+            f"   Block: {OLD_BLK} → {NEW_BLK} resources/theme\n"
         )
 
     def _fix_integrity(self):
-        """Actualiza fw_end, extiende el archivo y escribe la header copy.
+        """Updates fw_end, extends the file if needed, and writes the header copy.
 
-        El trailer (últimos 4 bytes) se preserva — el Echo Mini no verifica
-        activamente el CRC32 del trailer RKnano.
+        The trailer (last 4 bytes) is preserved as-is — the Echo Mini does not
+        actively verify the RKnano CRC32 trailer.
         """
         data = self.img_data
         if data[0x1F8:0x200] != b'RKnanoFW':
             return
 
+        # Save trailer before any resize
         saved_trailer = bytes(data[-4:])
 
+        # Recalculate fw_end from the actual end of Part5
         fw_end = struct.unpack_from('<I', data, 0x1F4)[0]
         ir_off = struct.unpack_from('<I', data, 0x14C)[0]
         ir_sz  = struct.unpack_from('<I', data, 0x150)[0]
@@ -309,6 +321,10 @@ class FirmwarePatcher:
             fw_end = ((p5_end + 0xFFFF) // 0x10000) * 0x10000
             struct.pack_into('<I', data, 0x1F4, fw_end)
 
+        # Extend the file so fw_end is within bounds.
+        # This fixes files that were patched/modified but not resized correctly —
+        # the Echo Mini rejects them because the bootloader looks for the header
+        # copy at fw_end and cannot find it.
         ALIGN   = 0x100000
         fw_size = ((fw_end + 16384 + ALIGN) // ALIGN) * ALIGN
         needed  = fw_size + 4
@@ -318,7 +334,10 @@ class FirmwarePatcher:
         elif len(data) > needed:
             del data[needed:]
 
+        # Write 512-byte header copy at fw_end (required by the bootloader)
         data[fw_end:fw_end + 0x200] = data[0:0x200]
+
+        # Restore trailer
         data[-4:] = saved_trailer
 
     def save(self, out_path: Path):
@@ -327,12 +346,12 @@ class FirmwarePatcher:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Parche de boot por tema para el firmware del Echo Mini (RKnano)"
+        description="Per-theme boot patch for the Echo Mini firmware (RKnano)"
     )
-    parser.add_argument("img",    nargs="?", help="Ruta al .IMG de entrada")
-    parser.add_argument("output", nargs="?", help="Ruta de salida (default: <nombre>_patched.IMG)")
+    parser.add_argument("img",    nargs="?", help="Path to the input .IMG file")
+    parser.add_argument("output", nargs="?", help="Output path (default: <name>_patched.IMG)")
     parser.add_argument("--check", action="store_true",
-                        help="Solo verificar estado del parche, sin modificar nada")
+                        help="Only check patch status, do not modify anything")
     args = parser.parse_args()
 
     if not args.img:
@@ -341,24 +360,24 @@ def main():
 
     inp = Path(args.img)
     if not inp.exists():
-        print(f"Error: no se encontró '{inp}'")
+        print(f"Error: file not found: '{inp}'")
         sys.exit(1)
 
-    print(f"Cargando {inp.name} …")
+    print(f"Loading {inp.name} ...")
     fw   = FirmwarePatcher(inp)
     info = fw.detect_patch_info()
 
-    print(f"  Recursos  : {info['resource_count']}")
-    print(f"  Bloque    : {info['old_block_size']} recursos/tema")
-    print(f"  CMP offset: 0x{info['cmp_offset']:X}  (valor: 0x{info['cmp_value']:04X})")
+    print(f"  Resources : {info['resource_count']}")
+    print(f"  Block size: {info['old_block_size']} resources/theme")
+    print(f"  CMP offset: 0x{info['cmp_offset']:X}  (value: 0x{info['cmp_value']:04X})")
     print(f"  ADDW      : {info['addw_values']}")
-    print(f"  Estado    : {'✅ ya parcheado' if info['is_patched'] else '⬜ sin parchear'}")
+    print(f"  Status    : {'already patched' if info['is_patched'] else 'not patched'}")
 
     if args.check:
         return
 
     if info['is_patched']:
-        print("\nEl firmware ya tiene el parche. No se realizaron cambios.")
+        print("\nFirmware is already patched. No changes made.")
         return
 
     out = Path(args.output) if args.output else inp.with_stem(inp.stem + "_patched")
@@ -366,19 +385,19 @@ def main():
     backup = inp.with_suffix(".IMG.bak")
     if not backup.exists():
         shutil.copy2(inp, backup)
-        print(f"\nBackup guardado en: {backup.name}")
+        print(f"\nBackup saved to: {backup.name}")
 
     def progress(pct):
         filled = int(pct / 5)
         print(f"\r  [{'█' * filled}{'░' * (20 - filled)}] {pct:3d}%", end="", flush=True)
 
-    print("\nAplicando parche …")
+    print("\nApplying patch ...")
     result = fw.patch_for_themed_boots(progress_fn=progress)
     print()
 
     fw.save(out)
     print(f"\n{result}")
-    print(f"Guardado en: {out}")
+    print(f"Saved to: {out}")
 
 
 if __name__ == "__main__":

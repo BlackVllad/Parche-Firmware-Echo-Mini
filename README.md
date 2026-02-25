@@ -1,275 +1,207 @@
-# Parche Firmware Echo Mini
+# Echo Mini Firmware Patch
 
-Parche standalone para el firmware `.IMG` del Echo Mini (RKnano) que habilita **animaciones de encendido y apagado personalizadas por tema**.
+Tools for customizing the Echo Mini (RKnano DAP) firmware `.IMG` file.
 
-## ¿Qué hace?
+## Scripts
 
-Por defecto, sin importar el tema visual activo (A–E), el Echo Mini siempre muestra la misma animación de boot/shutdown (la del Tema A). Este parche modifica el firmware para que cada tema tenga su propio set de imágenes de encendido/apagado.
+| Script | Purpose |
+|--------|---------|
+| `patch_echo_mini.py` | Per-theme boot/shutdown animation patch |
+| `fix_img_echo_mini.py` | Repair a `.IMG` rejected by the Echo Mini during update |
 
 ---
 
-## Diagrama: Parche de boot temático
+## patch_echo_mini.py — Per-theme boot patch
+
+### What it does
+
+By default, regardless of the active visual theme (A–E), the Echo Mini always
+plays the same boot/shutdown animation (Theme A's). This patch modifies the
+firmware so each theme has its own independent set of boot/shutdown images.
+
+### Changes applied
+
+| # | What | Detail |
+|---|------|--------|
+| 1 | Expands ROCK26 table | 1602 → 1870 entries (5 blocks × 374) |
+| 2 | Expands metadata table | Boot entries duplicated × 5, renamed `T_X_*` |
+| 3 | Patches CMP instruction | `CMP R0,#0x43` → `CMP R0,#0x00` — disables forced jump to Theme A |
+| 4 | Patches 4 ADDW instructions | Block offsets: `307×N` → `374×N` |
+| 5 | Updates `fw_end` and header copy | `_fix_integrity()` ensures the bootloader finds the header |
+
+> **Note on CRC32:** The Echo Mini includes an RKnano trailer with CRC32, but
+> **does not actively verify it** during flashing. The patch intentionally
+> preserves the original trailer without recalculating it.
+
+### Usage
+
+```bash
+# Apply the patch (generates HIFIEC20_patched.IMG)
+python patch_echo_mini.py HIFIEC20.IMG
+
+# Save with a custom name
+python patch_echo_mini.py HIFIEC20.IMG -o firmware_patched.IMG
+
+# Check if the patch is already applied
+python patch_echo_mini.py HIFIEC20.IMG --check
+```
+
+### Example output
 
 ```
-FIRMWARE ORIGINAL (.IMG, 32MB)
+Loading HIFIEC20.IMG ...
+  Resources : 1602
+  Block size: 307 resources/theme
+  CMP offset: 0x3DF5A  (value: 0x2843)
+  ADDW      : [307, 614, 921, 1228]
+  Status    : not patched
+
+Backup saved to: HIFIEC20.IMG.bak
+
+Applying patch ...
+  [████████████████████] 100%
+
+Patch applied successfully
+   CMP  : 0x3DF5A  (0x2843 → 0x2800)
+   ADDW : [307, 614, 921, 1228] → [374, 748, 1122, 1496]
+   Table: 1602 → 1870 entries
+   Block: 307 → 374 resources/theme
+
+Saved to: HIFIEC20_patched.IMG
+```
+
+---
+
+## fix_img_echo_mini.py — Repair a rejected .IMG
+
+### When to use it
+
+Use this when the Echo Mini detects the update file but cancels it within
+1-3 seconds. This happens when:
+- The `.IMG` was patched/modified but `fw_end` points outside the file bounds
+- The trailer is corrupted (e.g. `c618c618`)
+- The 512-byte header copy at `fw_end` is missing
+
+### How it works
+
+```
+Echo Mini bootloader reads fw_end from header[0x1F4]
+        │
+        ▼
+Looks for 512-byte header copy at offset fw_end
+        │
+   Is it inside the file?
+        │ NO  → cancels update, deletes the file  ✗  (~1-3 sec)
+        │ YES → proceeds with flashing            ✓
+```
+
+### Fixes applied
+
+1. Recalculates `fw_end` from the actual end of Part5
+2. Extends the file so `fw_end` is within bounds
+3. Writes the 512-byte header copy at `fw_end`
+4. Preserves the original trailer (CRC not verified by device)
+
+### Usage
+
+```bash
+# Repair (generates firmware_fixed.IMG)
+python fix_img_echo_mini.py firmware.IMG
+
+# Save with a custom name
+python fix_img_echo_mini.py firmware.IMG -o firmware_repaired.IMG
+
+# Show file info without repairing
+python fix_img_echo_mini.py firmware.IMG --info
+```
+
+### Example output
+
+```
+Loading HIFIEC20_boots.IMG ...
+  Size       : 55,728,744 bytes
+  fw_end     : 0x3530000  (OUTSIDE file — will be rejected)
+  Part5 end  : 0x3530000
+  Header copy: missing
+  Trailer    : c618c618
+
+Backup saved to: HIFIEC20_boots.IMG.bak
+
+Firmware integrity fixed
+
+   fw_end     : 0x3530000 → 0x3530000
+   Size       : 55,728,744 → 56,623,108 bytes (+868 KB)
+   Header copy: written at fw_end
+   Trailer    : c618c618 → c618c618
+
+Saved to: HIFIEC20_boots_fixed.IMG
+```
+
+---
+
+## Patch flow diagram
+
+```
+ORIGINAL FIRMWARE (.IMG, 32 MB)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 0x000000  ┌────────────────────┐
-          │   HEADER 512B      │  magic: RKnanoFW
+          │   HEADER 512 B     │  magic: RKnanoFW
           │   fw_end=0x1FA0000 │
 0x000200  ├────────────────────┤
           │   LOADER (ARM)     │
           │  ┌──────────────┐  │
           │  │ CMP R0,#0x43 │  │ ← offset 0x3DF5A
-          │  │ ADDW #307    │  │ ← offsets 0x3DF6A..88
-          │  │ ADDW #614    │  │   (uno por tema B/C/D/E)
+          │  │ ADDW #307    │  │ ← one per theme B/C/D/E
+          │  │ ADDW #614    │  │
           │  │ ADDW #921    │  │
           │  │ ADDW #1228   │  │
           │  └──────────────┘  │
-0x598224  ├────────────────────┤
-          │   PART4 / PART3    │
 0x9B5998  ├────────────────────┤
-          │   PART5 (recursos) │
-          │  ┌──────────────┐  │
-          │  │ ROCK26 table │  │  1602 entradas
-          │  │ (índice BMP) │  │
-          │  ├──────────────┤  │
-          │  │ Bitmaps RGB  │  │  imágenes reales
-          │  ├──────────────┤  │
-          │  │ Metadata tbl │  │  1602 entradas × 108B
-          │  └──────────────┘  │
+          │   PART5 (resources)│
+          │  ROCK26: 1602 entries
+          │  Metadata: 1602 entries
 0x1FA0000 ├────────────────────┤ ← fw_end
-          │   HEADER COPY      │  copia de los primeros 512B
+          │   HEADER COPY      │
 0x2000000 ├────────────────────┤
           │   3d94a194         │  trailer (4 bytes)
 0x2000004 └────────────────────┘
 
 
-APLICANDO EL PARCHE (patch_for_themed_boots)
+PATCHED FIRMWARE (.IMG, 54 MB)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-PASO 1 — Leer 67 recursos compartidos de boot (índices 0-66)
-  boot/charge/poweron images que se repiten en todos los temas
-
-PASO 2 — Construir nuevas tablas (5 bloques × 374 entradas)
-  ┌─────────────────────────────────────────────────────────┐
-  │ Bloque A: [67 copia_boot_A] + [307 recursos_tema_A]     │
-  │ Bloque B: [67 copia_boot_B] + [307 recursos_tema_B]     │
-  │ Bloque C: [67 copia_boot_C] + [307 recursos_tema_C]     │
-  │ Bloque D: [67 copia_boot_D] + [307 recursos_tema_D]     │
-  │ Bloque E: [67 copia_boot_E] + [307 recursos_tema_E]     │
-  └─────────────────────────────────────────────────────────┘
-  Total: 5 × 374 = 1870 entradas  (antes: 1602)
-  Copias B-E renombradas como T_B_*, T_C_*, T_D_*, T_E_*
-
-PASO 3 — Parchear instrucción CMP en el Loader
-  CMP R0, #0x43  →  CMP R0, #0x00
-  (0x43 = 67 = SHARED_COUNT; el salto ya no excluye los índices de boot)
-
-PASO 4 — Parchear 4 instrucciones ADDW
-  ADDW #307  →  ADDW #374   (tema B: bloque empieza en índice 374)
-  ADDW #614  →  ADDW #748   (tema C: bloque empieza en índice 748)
-  ADDW #921  →  ADDW #1122  (tema D: bloque empieza en índice 1122)
-  ADDW #1228 →  ADDW #1496  (tema E: bloque empieza en índice 1496)
-
-PASO 5 — Escribir tablas expandidas en el archivo
-  ROCK26: 1602 → 1870 entradas escritas en Part5
-  Metadata: 1602 → 1870 entradas escritas en Part5
-
-PASO 6 — Actualizar Part5 size en header[0x150]
-
-PASO 7 — _fix_integrity() (ver diagrama abajo)
-
-
-FIRMWARE PARCHEADO (.IMG, 54MB)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-0x000000  ┌────────────────────┐
-          │   HEADER 512B      │  magic: RKnanoFW
-          │   fw_end=0x3530000 │  ← actualizado
 0x000200  ├────────────────────┤
           │   LOADER (ARM)     │
           │  ┌──────────────┐  │
-          │  │ CMP R0,#0x00 │  │ ← PARCHEADO ✓
-          │  │ ADDW #374    │  │ ← PARCHEADO ✓
+          │  │ CMP R0,#0x00 │  │ ← PATCHED ✓
+          │  │ ADDW #374    │  │ ← PATCHED ✓
           │  │ ADDW #748    │  │
           │  │ ADDW #1122   │  │
           │  │ ADDW #1496   │  │
           │  └──────────────┘  │
 0x9B5998  ├────────────────────┤
-          │   PART5 (recursos) │
-          │  ┌──────────────┐  │
-          │  │ ROCK26 table │  │  1870 entradas ✓
-          │  ├──────────────┤  │
-          │  │ Bitmaps RGB  │  │  sin cambios
-          │  ├──────────────┤  │
-          │  │ Metadata tbl │  │  1870 entradas ✓
-          │  └──────────────┘  │
-0x3530000 ├────────────────────┤ ← fw_end
-          │   HEADER COPY      │  copia de los primeros 512B ✓
+          │   PART5 (resources)│
+          │  ROCK26: 1870 entries ✓
+          │  Metadata: 1870 entries ✓
+          │  Block A [0..373]:   original boots + A themed
+          │  Block B [374..747]: T_B_* boots  + B themed
+          │  Block C [748..1121]:T_C_* boots  + C themed
+          │  Block D [1122..1495]:T_D_* boots + D themed
+          │  Block E [1496..1869]:T_E_* boots + E themed
+0x3530000 ├────────────────────┤ ← fw_end (updated) ✓
+          │   HEADER COPY      │ ✓
 0x35FFFF4 ├────────────────────┤
-          │   3d94a194         │  trailer preservado ✓
+          │   3d94a194         │  trailer preserved ✓
 0x3600004 └────────────────────┘
 ```
 
 ---
 
-## Diagrama: `_fix_integrity()` — Por qué el Echo Mini rechaza un .IMG corrupto
+## Requirements
 
-```
-PROBLEMA: .IMG parcheado pero con fw_end fuera del archivo
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- Python 3.8 or higher
+- No external dependencies
 
-Echo Mini recibe el .IMG
-        │
-        ▼
-Bootloader lee header[0x1F4] → fw_end
-        │
-        ▼
-Busca copia del header en offset fw_end
-        │
-   ¿está dentro del archivo?
-        │ NO → cancela update, borra el archivo ✗  (~1-3 seg)
-        │ SÍ → continúa con el flasheo ✓
+## Compatibility
 
-
-FLUJO DE _fix_integrity()
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  ① Guardar trailer (últimos 4 bytes)
-     saved = img_data[-4:]  → ej: 3d94a194
-     (se guarda ANTES de cambiar el tamaño del archivo)
-           │
-           ▼
-  ② Recalcular fw_end
-     p5_end = Part5_offset + Part5_size
-     si p5_end > fw_end actual:
-       fw_end = redondear_arriba(p5_end, 64KB)
-       escribir en header[0x1F4]
-           │
-           ▼
-  ③ Ajustar tamaño del archivo    ← FIX CRÍTICO
-     needed = redondear_arriba(fw_end + 16KB, 1MB) + 4
-     archivo corto → extender con \x00
-     archivo largo → recortar
-     (garantiza que fw_end quede DENTRO del archivo)
-           │
-           ▼
-  ④ Escribir header copy en fw_end
-     img_data[fw_end : fw_end+0x200] = img_data[0:0x200]
-     (512 bytes, el bootloader REQUIERE encontrarlos aquí)
-           │
-           ▼
-  ⑤ Restaurar trailer
-     img_data[-4:] = saved_trailer
-     (CRC no verificado por el dispositivo → se deja intacto)
-
-
-EJEMPLO REAL: HIFIEC20_boots.IMG
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  ANTES (rechazado)          DESPUÉS (aceptado)
-  ─────────────────          ──────────────────
-  Tamaño : 53 MB             Tamaño : 54 MB
-  fw_end : 0x3530000         fw_end : 0x3530000
-  Archivo termina: 0x3525A68 Archivo termina: 0x3600004
-  fw_end FUERA ✗             fw_end DENTRO ✓
-  Header copy: NO ✗          Header copy: SÍ ✓
-  Trailer: c618c618 ✗        Trailer: c618c618 (preservado)
-```
-
----
-
-## Cambios que aplica el parche
-
-| # | Qué | Detalle |
-|---|-----|---------|
-| 1 | Expande tabla ROCK26 | 1602 → 1870 entradas (5 bloques × 374) |
-| 2 | Expande tabla de metadatos | Las entradas de boot se multiplican × 5, renombradas `T_X_*` |
-| 3 | Parchea instrucción CMP | `CMP R0,#0x43` → `CMP R0,#0x00` — desactiva el salto forzado al Tema A |
-| 4 | Parchea 4 instrucciones ADDW | Offsets de bloque: `307×N` → `374×N` |
-| 5 | Actualiza `fw_end` y header copy | `_fix_integrity()` garantiza que el bootloader encuentre el header |
-
-> **Nota sobre CRC32:** El Echo Mini incluye un trailer RKnano con CRC32, pero **no lo verifica activamente** al flashear. El parche preserva el trailer original sin modificarlo.
-
----
-
-## Reparar un .IMG que el Echo Mini rechaza
-
-Si el dispositivo detecta el update pero lo cancela en 1-3 segundos, usa `fix_img_echo_mini.py`:
-
-```bash
-python fix_img_echo_mini.py archivo_corrupto.IMG
-```
-
----
-
-## Scripts
-
-| Script | Función |
-|--------|---------|
-| `patch_echo_mini.py` | Aplica el parche de boot por tema |
-| `fix_img_echo_mini.py` | Repara un .IMG que el Echo Mini rechaza |
-
----
-
-## Requisitos
-
-- Python 3.8 o superior
-- Sin dependencias externas
-
-## Uso — Parche de boot (`patch_echo_mini.py`)
-
-```bash
-# Aplicar el parche (genera HIFIEC20_patched.IMG)
-python patch_echo_mini.py HIFIEC20.IMG
-
-# Guardar con nombre personalizado
-python patch_echo_mini.py HIFIEC20.IMG -o firmware_modificado.IMG
-
-# Solo verificar si el parche ya está aplicado
-python patch_echo_mini.py HIFIEC20.IMG --check
-```
-
-## Uso — Reparar .IMG (`fix_img_echo_mini.py`)
-
-Úsalo cuando el Echo Mini detecta el update pero lo cancela en 1-3 segundos.
-
-```bash
-# Reparar (genera HIFIEC20_fixed.IMG)
-python fix_img_echo_mini.py firmware.IMG
-
-# Guardar con nombre personalizado
-python fix_img_echo_mini.py firmware.IMG -o firmware_reparado.IMG
-
-# Solo ver información del archivo sin reparar
-python fix_img_echo_mini.py firmware.IMG --info
-```
-
-## Ejemplo de salida
-
-```
-Cargando HIFIEC20.IMG …
-  Recursos  : 1602
-  Bloque    : 307 recursos/tema
-  CMP offset: 0x3DF5A  (valor: 0x2843)
-  ADDW      : [307, 614, 921, 1228]
-  Estado    : ⬜ sin parchear
-
-Backup guardado en: HIFIEC20.IMG.bak
-
-Aplicando parche …
-  [████████████████████] 100%
-
-✅ Parche aplicado correctamente
-   CMP  : 0x3DF5A  (0x2843 → 0x2800)
-   ADDW : [307, 614, 921, 1228] → [374, 748, 1122, 1496]
-   Tabla: 1602 → 1870 entradas
-   Bloque: 307 → 374 recursos/tema
-
-Guardado en: HIFIEC20_patched.IMG
-```
-
-## Compatibilidad
-
-Probado con firmware **Echo Mini v3.2.0** (`HIFIEC20.IMG`).  
-El parche detecta automáticamente los offsets — no requiere configuración manual.
-
+Tested with **Echo Mini v3.2.0** firmware (`HIFIEC20.IMG`).  
+Offsets are auto-detected — no manual configuration needed.
