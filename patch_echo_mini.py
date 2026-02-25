@@ -277,7 +277,8 @@ class FirmwarePatcher:
         data[cmp_off:cmp_off + 2] = struct.pack('<H', 0x2800)
 
         # Patch 4 ADDW instructions
-        new_addw_vals = [NEW_BLK * (i + 1) for i in range(4)]
+        # ADDW[2] -> device slot E, ADDW[3] -> device slot D (confirmed by hardware behavior)
+        new_addw_vals = [NEW_BLK, NEW_BLK * 2, NEW_BLK * 4, NEW_BLK * 3]
         for i, (foff, _old_val) in enumerate(addw_list):
             data[foff:foff + 4] = self._encode_addw(new_addw_vals[i], rd=0, rn=0)
 
