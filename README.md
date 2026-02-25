@@ -194,17 +194,20 @@ EJEMPLO REAL: HIFIEC20_boots.IMG
 
 ## Reparar un .IMG que el Echo Mini rechaza
 
-Si el dispositivo detecta el update pero lo cancela en 1-3 segundos:
+Si el dispositivo detecta el update pero lo cancela en 1-3 segundos, usa `fix_img_echo_mini.py`:
 
 ```bash
-python patch_echo_mini.py archivo_corrupto.IMG --fix
+python fix_img_echo_mini.py archivo_corrupto.IMG
 ```
 
-Esto aplica solo `fix_corrupt_firmware()` sin tocar el parche de boot:
-- Recalcula `fw_end` desde el final real de Part5
-- Extiende el archivo para que `fw_end` quede dentro
-- Escribe la header copy en `fw_end`
-- Preserva el trailer
+---
+
+## Scripts
+
+| Script | Función |
+|--------|---------|
+| `patch_echo_mini.py` | Aplica el parche de boot por tema |
+| `fix_img_echo_mini.py` | Repara un .IMG que el Echo Mini rechaza |
 
 ---
 
@@ -213,7 +216,7 @@ Esto aplica solo `fix_corrupt_firmware()` sin tocar el parche de boot:
 - Python 3.8 o superior
 - Sin dependencias externas
 
-## Uso
+## Uso — Parche de boot (`patch_echo_mini.py`)
 
 ```bash
 # Aplicar el parche (genera HIFIEC20_patched.IMG)
@@ -224,9 +227,21 @@ python patch_echo_mini.py HIFIEC20.IMG -o firmware_modificado.IMG
 
 # Solo verificar si el parche ya está aplicado
 python patch_echo_mini.py HIFIEC20.IMG --check
+```
 
-# Reparar un .IMG que el Echo Mini rechaza
-python patch_echo_mini.py archivo.IMG --fix
+## Uso — Reparar .IMG (`fix_img_echo_mini.py`)
+
+Úsalo cuando el Echo Mini detecta el update pero lo cancela en 1-3 segundos.
+
+```bash
+# Reparar (genera HIFIEC20_fixed.IMG)
+python fix_img_echo_mini.py firmware.IMG
+
+# Guardar con nombre personalizado
+python fix_img_echo_mini.py firmware.IMG -o firmware_reparado.IMG
+
+# Solo ver información del archivo sin reparar
+python fix_img_echo_mini.py firmware.IMG --info
 ```
 
 ## Ejemplo de salida
