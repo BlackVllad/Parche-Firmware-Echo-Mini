@@ -45,6 +45,9 @@ class FirmwarePatcher:
     def __init__(self, img_path: Path):
         self.img_path = Path(img_path)
         self.img_data = bytearray(self.img_path.read_bytes())
+        # BUG-9 FIX: save the original trailer HERE, before patch_for_themed_boots()
+        # extends img_data with zero bytes, making data[-4:] == b'\x00\x00\x00\x00'.
+        self._original_trailer = bytes(self.img_data[-4:])
         self._parse()
 
     def _parse(self):
@@ -125,7 +128,9 @@ class FirmwarePatcher:
         data       = self.img_data
         cmp_offset = None
 
-        for off in range(0x200, min(len(data), 0x400000), 2):
+        # Search only within the code section (before Part5), never into resource data
+        search_limit = min(self.part5_offset, 0x600000)
+        for off in range(0x200, search_limit, 2):
             val = struct.unpack_from('<H', data, off)[0]
             if val == 0x2843 or val == 0x2800:
                 addw_offsets = []
@@ -138,8 +143,12 @@ class FirmwarePatcher:
                         if imm > 100:
                             addw_offsets.append((scan, imm))
                 if len(addw_offsets) >= 4:
-                    cmp_offset = off
-                    break
+                    # Validate: values must form the exact pattern {k, 2k, 3k, 4k}
+                    vals = {v for _, v in addw_offsets[:4]}
+                    k = min(vals)
+                    if k > 0 and vals == {k, k * 2, k * 3, k * 4}:
+                        cmp_offset = off
+                        break
 
         if cmp_offset is None:
             raise ValueError("Theme dispatch CMP instruction not found.")
@@ -257,8 +266,68 @@ class FirmwarePatcher:
                 data.extend(b'\x00' * (pos + 16 - len(data)))
             data[pos:pos + 16] = entry_raw
 
-        # Write expanded metadata table
+        # meta_abs is needed by both the relocation guard and the metadata write loop.
         meta_abs = self.part5_offset + self.table_start
+
+        # Relocate pixel data that would be overwritten by the expanded metadata table.
+        # The metadata table grows in-place; if its new end exceeds the old end it would
+        # clobber pixel data stored immediately after the original table.
+        orig_meta_end_abs = meta_abs + old_count * self.METADATA_ENTRY_SIZE
+        new_meta_end_abs  = meta_abs + len(new_meta) * self.METADATA_ENTRY_SIZE
+        if new_meta_end_abs > orig_meta_end_abs:
+            ow_start  = orig_meta_end_abs - self.part5_offset  # relative to Part5
+            ow_end    = new_meta_end_abs  - self.part5_offset
+            reloc     = {}                                      # old_rel_off -> new_rel_off
+            append_at = max(self.part5_size, ow_end)
+
+            for e in self.entries:
+                off = e['offset']
+                w   = int(e.get('width',  0) or 0)
+                h   = int(e.get('height', 0) or 0)
+                if w <= 0 or h <= 0 or off in reloc:
+                    continue
+                if off < ow_end and off + w * h * 2 > ow_start:
+                    reloc[off] = append_at
+                    append_at += w * h * 2
+
+            if reloc:
+                needed = self.part5_offset + append_at + 4
+                if len(data) < needed:
+                    data.extend(b'\x00' * (needed - len(data)))
+
+                # Copy pixel blobs to their new locations BEFORE the metadata write
+                # overwrites their original positions.
+                for old_rel in sorted(reloc):
+                    new_rel  = reloc[old_rel]
+                    pix_size = next(
+                        e['width'] * e['height'] * 2
+                        for e in self.entries
+                        if e['offset'] == old_rel and e['width'] > 0 and e['height'] > 0
+                    )
+                    src = self.part5_offset + old_rel
+                    dst = self.part5_offset + new_rel
+                    data[dst:dst + pix_size] = data[src:src + pix_size]
+
+                # Patch the offset field in new_meta entries (bytes 20-23)
+                updated_meta = []
+                for m in new_meta:
+                    raw     = bytearray(m)
+                    old_off = struct.unpack_from('<I', raw, 20)[0]
+                    if old_off in reloc:
+                        struct.pack_into('<I', raw, 20, reloc[old_off])
+                    updated_meta.append(bytes(raw))
+                new_meta = updated_meta
+
+                # Patch already-written ROCK26 entries (offset at bytes 12-15)
+                for i in range(new_count):
+                    rp = entries_abs + i * 16
+                    ro = struct.unpack_from('<I', data, rp + 12)[0]
+                    if ro in reloc:
+                        struct.pack_into('<I', data, rp + 12, reloc[ro])
+
+                self.part5_size = max(self.part5_size, append_at)
+
+        # Write expanded metadata table
         for i, meta_raw in enumerate(new_meta):
             pos = meta_abs + i * self.METADATA_ENTRY_SIZE
             if pos + self.METADATA_ENTRY_SIZE > len(data):
@@ -268,9 +337,11 @@ class FirmwarePatcher:
         if progress_fn:
             progress_fn(50)
 
-        # Update Part5 size in header
-        new_p5_end      = (meta_abs + len(new_meta) * self.METADATA_ENTRY_SIZE) - self.part5_offset
-        self.part5_size = new_p5_end
+        # Update Part5 size in header — never shrink below the original size or the
+        # relocation-extended size; only grow if metadata or relocated data demands it.
+        new_meta_end_in_p5 = (meta_abs + len(new_meta) * self.METADATA_ENTRY_SIZE) - self.part5_offset
+        new_p5_end         = max(self.part5_size, new_meta_end_in_p5)
+        self.part5_size    = new_p5_end
         struct.pack_into('<I', data, 0x150, new_p5_end)
 
         # Patch CMP R0,#0x43 → CMP R0,#0x00
@@ -309,8 +380,9 @@ class FirmwarePatcher:
         if data[0x1F8:0x200] != b'RKnanoFW':
             return
 
-        # Save trailer before any resize
-        saved_trailer = bytes(data[-4:])
+        # Use the trailer saved at __init__ time — by this point extend() calls have
+        # already zeroed data[-4:], so reading it here would return b'\x00\x00\x00\x00'.
+        saved_trailer = self._original_trailer
 
         # Recalculate fw_end from the actual end of Part5
         fw_end = struct.unpack_from('<I', data, 0x1F4)[0]
